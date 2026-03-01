@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 import types
+import uuid
 import warnings
 from collections.abc import Callable
 from functools import partial
@@ -28,6 +29,7 @@ from mcp.types import AnyFunction, ToolAnnotations
 
 import fastmcp
 from fastmcp.server.auth.authorization import AuthCheck
+from fastmcp.server.providers.base import _APP_TOOL_REGISTRY
 from fastmcp.server.tasks.config import TaskConfig
 from fastmcp.tools.function_tool import FunctionTool
 from fastmcp.tools.tool import Tool
@@ -124,6 +126,30 @@ def _expand_prefab_ui_meta(tool: Tool) -> None:
     tool.meta = meta
 
 
+def _maybe_generate_app_global_key(tool: Tool) -> None:
+    """Generate a global key for app-visible tools.
+
+    If ``meta["ui"]["visibility"]`` includes ``"app"``, stamps a unique
+    ``globalKey`` into the tool's UI metadata and registers it in the
+    module-level ``_APP_TOOL_REGISTRY``. This key is used by
+    ``FastMCP.call_tool`` to resolve app tool calls without going
+    through the transform chain (Namespace, ToolTransform, etc.).
+    """
+    meta = tool.meta or {}
+    ui = meta.get("ui")
+    if not isinstance(ui, dict):
+        return
+    visibility = ui.get("visibility")
+    if not isinstance(visibility, list) or "app" not in visibility:
+        return
+    if "globalKey" in ui:
+        return
+
+    global_key = f"{tool.name}-{uuid.uuid4().hex[:8]}"
+    ui["globalKey"] = global_key
+    _APP_TOOL_REGISTRY[global_key] = tool.name
+
+
 def _maybe_apply_prefab_ui(provider: LocalProvider, tool: Tool) -> None:
     """Auto-wire prefab UI metadata and renderer resource if needed."""
     if not _HAS_PREFAB:
@@ -200,6 +226,7 @@ class ToolDecoratorMixin:
         if not enabled:
             self.disable(keys={tool.key})
         _maybe_apply_prefab_ui(self, tool)
+        _maybe_generate_app_global_key(tool)
         return tool
 
     @overload
@@ -378,6 +405,7 @@ class ToolDecoratorMixin:
                 if not enabled:
                     self.disable(keys={tool_obj.key})
                 _maybe_apply_prefab_ui(self, tool_obj)
+                _maybe_generate_app_global_key(tool_obj)
                 return tool_obj
             else:
                 from fastmcp.tools.function_tool import ToolMeta

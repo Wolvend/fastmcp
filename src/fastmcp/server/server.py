@@ -68,6 +68,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.mixins import LifespanMixin, MCPOperationsMixin, TransportMixin
 from fastmcp.server.providers import LocalProvider, Provider
 from fastmcp.server.providers.aggregate import AggregateProvider
+from fastmcp.server.providers.base import _APP_TOOL_CALL, _APP_TOOL_REGISTRY
 from fastmcp.server.tasks.config import TaskConfig, TaskMeta
 from fastmcp.server.telemetry import server_span
 from fastmcp.server.transforms import (
@@ -973,41 +974,52 @@ class FastMCP(
                 )
 
             # Core logic: find and execute tool (providers queried in parallel)
-            # Use get_tool to apply transforms and filter disabled
-            with server_span(
-                f"tools/call {name}", "tools/call", self.name, "tool", name
-            ) as span:
-                tool = await self.get_tool(name, version=version)
-                if tool is None:
-                    raise NotFoundError(f"Unknown tool: {name!r}")
-                span.set_attributes(tool.get_span_attributes())
-                if task_meta is not None and task_meta.fn_key is None:
-                    task_meta = replace(task_meta, fn_key=tool.key)
-                try:
-                    return await tool._run(arguments or {}, task_meta=task_meta)
-                except FastMCPError:
-                    logger.exception(f"Error calling tool {name!r}")
-                    raise
-                except (ValidationError, PydanticValidationError):
-                    logger.exception(f"Error validating tool {name!r}")
-                    raise
-                except Exception as e:
-                    logger.exception(f"Error calling tool {name!r}")
-                    # Handle actionable errors that should reach the LLM
-                    # even when masking is enabled
-                    if isinstance(e, httpx.HTTPStatusError):
-                        if e.response.status_code == 429:
+            # If the name matches an app tool global key, resolve it to the
+            # local name and set _APP_TOOL_CALL so provider transforms
+            # (Namespace, ToolTransform) are bypassed during resolution.
+            app_tool_token = None
+            if name in _APP_TOOL_REGISTRY:
+                name = _APP_TOOL_REGISTRY[name]
+                app_tool_token = _APP_TOOL_CALL.set(True)
+
+            try:
+                with server_span(
+                    f"tools/call {name}", "tools/call", self.name, "tool", name
+                ) as span:
+                    tool = await self.get_tool(name, version=version)
+                    if tool is None:
+                        raise NotFoundError(f"Unknown tool: {name!r}")
+                    span.set_attributes(tool.get_span_attributes())
+                    if task_meta is not None and task_meta.fn_key is None:
+                        task_meta = replace(task_meta, fn_key=tool.key)
+                    try:
+                        return await tool._run(arguments or {}, task_meta=task_meta)
+                    except FastMCPError:
+                        logger.exception(f"Error calling tool {name!r}")
+                        raise
+                    except (ValidationError, PydanticValidationError):
+                        logger.exception(f"Error validating tool {name!r}")
+                        raise
+                    except Exception as e:
+                        logger.exception(f"Error calling tool {name!r}")
+                        # Handle actionable errors that should reach the LLM
+                        # even when masking is enabled
+                        if isinstance(e, httpx.HTTPStatusError):
+                            if e.response.status_code == 429:
+                                raise ToolError(
+                                    "Rate limited by upstream API, please retry later"
+                                ) from e
+                        if isinstance(e, httpx.TimeoutException):
                             raise ToolError(
-                                "Rate limited by upstream API, please retry later"
+                                "Upstream request timed out, please retry"
                             ) from e
-                    if isinstance(e, httpx.TimeoutException):
-                        raise ToolError(
-                            "Upstream request timed out, please retry"
-                        ) from e
-                    # Standard masking logic
-                    if self._mask_error_details:
-                        raise ToolError(f"Error calling tool {name!r}") from e
-                    raise ToolError(f"Error calling tool {name!r}: {e}") from e
+                        # Standard masking logic
+                        if self._mask_error_details:
+                            raise ToolError(f"Error calling tool {name!r}") from e
+                        raise ToolError(f"Error calling tool {name!r}: {e}") from e
+            finally:
+                if app_tool_token is not None:
+                    _APP_TOOL_CALL.reset(app_tool_token)
 
     @overload
     async def read_resource(
