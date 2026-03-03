@@ -412,6 +412,7 @@
                             "pages": [
                               "python-sdk/fastmcp-client-sampling-handlers-__init__",
                               "python-sdk/fastmcp-client-sampling-handlers-anthropic",
+                              "python-sdk/fastmcp-client-sampling-handlers-google_genai",
                               "python-sdk/fastmcp-client-sampling-handlers-openai"
                             ]
                           }
